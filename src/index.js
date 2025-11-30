@@ -130,7 +130,7 @@ function looksBrandable(word, tags) {
   if (!SAFE_WORD.test(w)) return false;
   if (BLOCKLIST.has(w)) return false;
   if (BANNED_PREFIXES.some(p => w.startsWith(p))) return false;
-  if (BANNED_SUFFIXES.some(s => w.endsWith(s))) return false;
+  if (BANNED_SUFFIXES.some(s) => w.endsWith(s)) return false;
   if (w.endsWith("s")) return false;
   if (w.endsWith("ing")) return false;
 
@@ -272,6 +272,130 @@ async function handleGenerateOorName(request) {
   }
 }
 
+// --- DEBUG / ADMIN HANDLERS FOR GENERATOR ---
+
+async function handleDebugUsed(request) {
+  try {
+    const arr = await redisCmd("SMEMBERS", "oor_used_words").catch(() => []);
+    const used = Array.isArray(arr) ? arr : [];
+    return new Response(JSON.stringify({
+      ok: true,
+      count: used.length,
+      items: used
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: String(e)
+    }), {
+      status: 500,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  }
+}
+
+async function handleDebugPool(request) {
+  try {
+    const pool = await loadPoolCache();
+    const list = Array.isArray(pool) ? pool : [];
+    return new Response(JSON.stringify({
+      ok: true,
+      count: list.length,
+      items: list
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: String(e)
+    }), {
+      status: 500,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  }
+}
+
+async function handleRebuildPool(request) {
+  try {
+    const pool = await buildPool(false); // force rebuild
+    return new Response(JSON.stringify({
+      ok: true,
+      count: pool.length,
+      note: "pool rebuilt from Datamuse"
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: String(e)
+    }), {
+      status: 500,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  }
+}
+
+async function handleResetGenerator(request) {
+  try {
+    await redisCmd("DEL", "oor_used_words");
+    await redisCmd("DEL", "oor_pool_cache");
+    return new Response(JSON.stringify({
+      ok: true,
+      note: "oor_used_words and oor_pool_cache deleted"
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: String(e)
+    }), {
+      status: 500,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS"
+      }
+    });
+  }
+}
+
 /* -------------------------------------------------------
      YOUR ORIGINAL PROXY — UNTOUCHED
 --------------------------------------------------------*/
@@ -348,16 +472,28 @@ async function handleProxy(request) {
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    const f = url.searchParams.get("f");
 
-    // NEW endpoint
-    if (
-      url.pathname.endsWith("/ajax.php") &&
-      url.searchParams.get("f") === "generate_oor_name"
-    ) {
-      return handleGenerateOorName(request);
+    // All our custom endpoints live on /ajax.php
+    if (url.pathname.endsWith("/ajax.php")) {
+      if (f === "generate_oor_name") {
+        return handleGenerateOorName(request);
+      }
+      if (f === "debug_used") {
+        return handleDebugUsed(request);
+      }
+      if (f === "debug_pool") {
+        return handleDebugPool(request);
+      }
+      if (f === "rebuild_pool") {
+        return handleRebuildPool(request);
+      }
+      if (f === "reset_generator") {
+        return handleResetGenerator(request);
+      }
     }
 
-    // Everything else → your original proxy
+    // Everything else → original GuerrillaMail proxy
     return handleProxy(request);
   }
 };
