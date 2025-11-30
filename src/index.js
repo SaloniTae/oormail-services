@@ -276,7 +276,8 @@ async function handleGenerateOorName(request) {
 
 async function handleDebugUsed(request) {
   try {
-    const arr = await redisCmd("SMEMBERS", "oor_used_words").catch(() => []);
+    // NO .catch() here – let it throw so we see the real error
+    const arr = await redisCmd("SMEMBERS", "oor_used_words");
     const used = Array.isArray(arr) ? arr : [];
     return new Response(JSON.stringify({
       ok: true,
@@ -307,8 +308,17 @@ async function handleDebugUsed(request) {
 
 async function handleDebugPool(request) {
   try {
-    const pool = await loadPoolCache();
-    const list = Array.isArray(pool) ? pool : [];
+    // direct Redis GET so we see raw data / errors
+    const raw = await redisCmd("GET", "oor_pool_cache");
+    let list = [];
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) list = parsed;
+      } catch {
+        // leave list as []
+      }
+    }
     return new Response(JSON.stringify({
       ok: true,
       count: list.length,
