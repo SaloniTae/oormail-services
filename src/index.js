@@ -354,7 +354,7 @@ export default {
       url.pathname.endsWith("/ajax.php") &&
       url.searchParams.get("f") === "generate_oor_name"
     ) {
-      return handleGenerateName(request);
+      return handleGenerateOorName(request);
     }
 
     // Everything else → your original proxy
