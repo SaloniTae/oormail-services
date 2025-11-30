@@ -71,22 +71,18 @@ async function redisCmd(cmd, ...args) {
 
 // Used words: Redis SET "oor_used_words"
 async function loadUsedSet() {
-  const arr = await redisCmd("SMEMBERS", "oor_used_words").catch(() => null);
+  const arr = await redisCmd("SMEMBERS", "oor_used_words");
   if (!Array.isArray(arr)) return new Set();
   return new Set(arr);
 }
 
 async function addUsedWord(word) {
-  try {
-    await redisCmd("SADD", "oor_used_words", word);
-  } catch (e) {
-    // non-critical
-  }
+  await redisCmd("SADD", "oor_used_words", word);
 }
 
 // Pool cache: Redis GET/SET key "oor_pool_cache" (JSON array of words)
 async function loadPoolCache() {
-  const raw = await redisCmd("GET", "oor_pool_cache").catch(() => null);
+  const raw = await redisCmd("GET", "oor_pool_cache");
   if (typeof raw !== "string") return null;
   try {
     const arr = JSON.parse(raw);
@@ -97,11 +93,7 @@ async function loadPoolCache() {
 }
 
 async function savePoolCache(words) {
-  try {
-    await redisCmd("SET", "oor_pool_cache", JSON.stringify(words));
-  } catch (e) {
-    // non-critical
-  }
+  await redisCmd("SET", "oor_pool_cache", JSON.stringify(words));
 }
 
 // Datamuse helper
@@ -241,7 +233,7 @@ async function generateOorName() {
   return PREFIX + chosen;
 }
 
-// Optional HTTP handler for Worker
+// HTTP handler for generator
 async function handleGenerateOorName(request) {
   try {
     const id = await generateOorName();
@@ -276,7 +268,6 @@ async function handleGenerateOorName(request) {
 
 async function handleDebugUsed(request) {
   try {
-    // NO .catch() here – let it throw so we see the real error
     const arr = await redisCmd("SMEMBERS", "oor_used_words");
     const used = Array.isArray(arr) ? arr : [];
     return new Response(JSON.stringify({
@@ -308,7 +299,6 @@ async function handleDebugUsed(request) {
 
 async function handleDebugPool(request) {
   try {
-    // direct Redis GET so we see raw data / errors
     const raw = await redisCmd("GET", "oor_pool_cache");
     let list = [];
     if (typeof raw === "string") {
@@ -316,7 +306,7 @@ async function handleDebugPool(request) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) list = parsed;
       } catch {
-        // leave list as []
+        // ignore parse error, keep list = []
       }
     }
     return new Response(JSON.stringify({
