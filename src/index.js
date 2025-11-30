@@ -2,7 +2,7 @@
 
 // Upstash Redis (raw, no env)
 const UPSTASH_REDIS_REST_URL = "https://true-liger-27415.upstash.io";
-const UPSTASH_REDIS_REST_TOKEN = "AmsXAAIgcDIpnskeS5gL2HzKyaaKPgvWwbG24CjfQYNJrB6WiehLPg";
+const UPSTASH_REDIS_REST_TOKEN = "AWsXAAIncDJhYmQ2MmMyOTE1ODA0NGVmYmYyYmM0N2IzOTdiNDE5NHAyMjc0MTU";
 
 // Datamuse
 const DATAMUSE_API = "https://api.datamuse.com/words";
