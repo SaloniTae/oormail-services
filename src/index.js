@@ -130,7 +130,7 @@ function looksBrandable(word, tags) {
   if (!SAFE_WORD.test(w)) return false;
   if (BLOCKLIST.has(w)) return false;
   if (BANNED_PREFIXES.some(p => w.startsWith(p))) return false;
-  if (BANNED_SUFFIXES.some(s) => w.endsWith(s)) return false;
+  if (BANNED_SUFFIXES.some(s => w.endsWith(s))) return false;
   if (w.endsWith("s")) return false;
   if (w.endsWith("ing")) return false;
 
@@ -439,7 +439,7 @@ async function handleProxy(request) {
     let newSid = null;
     if (rawCookies) {
       const match = rawCookies.match(/PHPSESSID=([^;]+)/);
-      if (match?.[1]) newSid = match[1];
+      if (match && match[1]) newSid = match[1];
     }
 
     const text = await response.text();
