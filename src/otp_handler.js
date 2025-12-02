@@ -1,6 +1,5 @@
 // --- CONFIGURATION ---
-// CHANGED: Point directly to the upstream API to avoid Error 1042 (Loop)
-const BASE_URL = "https://api.guerrillamail.com/ajax.php"; 
+const BASE_URL = "https://api.guerrillamail.com/ajax.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 // Main function to handle the OTP request
@@ -11,25 +10,23 @@ export async function handleOtpRequest(request) {
 
   // 1. Validate Inputs
   if (!mailParam || !mailParam.includes("@")) {
-    return jsonResponse({ error: "Invalid email. Usage: /otp?mail=user@email.com&platform=netflix" }, 400);
+    return jsonResponse({ error: "Invalid email parameter." }, 400);
   }
   if (!platformParam) {
-    return jsonResponse({ error: "Missing platform. Usage: /otp?mail=...&platform=netflix" }, 400);
+    return jsonResponse({ error: "Missing platform parameter." }, 400);
   }
 
   const userPart = mailParam.split("@")[0].toLowerCase();
   const platform = platformParam.toLowerCase();
 
   try {
-    // 2. Start Session (Get Token)
-    // We call get_email_address to initialize a session ID (sid_token)
+    // 2. Initialize Session (Get Token)
     const sessionData = await callOorApi({ f: "get_email_address" });
     const sidToken = sessionData.sid_token;
-    
-    if (!sidToken) throw new Error("Failed to initialize session (No sid_token returned).");
 
-    // 3. Set the Manual Email User
-    // We must pass the sid_token so the server knows which session to update
+    if (!sidToken) throw new Error("Failed to init session.");
+
+    // 3. Set Email User (Link username to session)
     await callOorApi({ 
       f: "set_email_user", 
       email_user: userPart, 
@@ -45,53 +42,83 @@ export async function handleOtpRequest(request) {
 
     const msgList = inboxData.list || [];
 
-    // If inbox is empty
     if (msgList.length === 0) {
-      return jsonResponse({ 
-        status: "empty", 
-        message: "No emails found.",
-        email: mailParam,
-        results: []
-      });
+      return jsonResponse({ status: "empty", message: "Inbox is empty" });
     }
 
-    // 5. Slice the top 5 emails (New to Old)
-    const topEmails = msgList.slice(0, 5);
+    // 5. CONCURRENT PROCESSING (The "Fast" Part)
+    // We take the top 10 emails. We fetch all their bodies AT THE SAME TIME.
+    // This is much faster than a loop.
+    const scanLimit = 10; 
+    const emailsToScan = msgList.slice(0, scanLimit);
 
-    // 6. Process all 5 emails concurrently
-    const results = await Promise.all(topEmails.map(async (msg) => {
-      const mailId = msg.mail_id;
+    const promises = emailsToScan.map(async (msg) => {
       const subject = msg.mail_subject || "";
-      const timestamp = msg.mail_timestamp;
+      
+      // OPTIMIZATION: For Zee5, check Subject FIRST. 
+      // If code is in subject, we don't even need to fetch the body (Super fast).
+      if (platform === 'zee5') {
+        const subjectCode = extractZee5Subject(subject);
+        if (subjectCode) {
+          return {
+            found: true,
+            code: subjectCode,
+            subject: unescapeHtml(subject),
+            date_time: convertToIST(msg.mail_timestamp),
+            timestamp: msg.mail_timestamp // used for sorting
+          };
+        }
+      }
 
-      // Fetch Body
+      // Fetch Body (if not found in subject or different platform)
       const bodyData = await callOorApi({ 
         f: "fetch_email", 
         sid_token: sidToken, 
-        email_id: mailId 
+        email_id: msg.mail_id 
       });
-      
+
       const rawBody = bodyData.mail_body || "";
-      const otpCode = extractOtp(rawBody, subject, platform);
+      const code = extractOtp(rawBody, subject, platform);
 
-      return {
-        mail_id: mailId,
-        code: otpCode, 
-        subject: unescapeHtml(subject),
-        date_time: convertToIST(timestamp)
-      };
-    }));
-
-    // 7. Return JSON Response
-    const anyCodeFound = results.some(r => r.code !== null);
-
-    return jsonResponse({
-      status: anyCodeFound ? "success" : "no_code_found_in_top_5",
-      platform: platform,
-      email: mailParam,
-      count: results.length,
-      messages: results
+      if (code) {
+        return {
+          found: true,
+          code: code,
+          subject: unescapeHtml(subject),
+          date_time: convertToIST(msg.mail_timestamp),
+          timestamp: msg.mail_timestamp
+        };
+      }
+      
+      return { found: false }; // No code in this email
     });
+
+    // Wait for all checks to finish
+    const results = await Promise.all(promises);
+
+    // 6. Filter & Sort to get the LATEST valid code
+    const validResults = results
+      .filter(r => r.found)
+      .sort((a, b) => b.timestamp - a.timestamp); // Sort Newest -> Oldest
+
+    if (validResults.length > 0) {
+      // Return the specific latest match
+      const latest = validResults[0];
+      return jsonResponse({
+        status: "success",
+        platform: platform,
+        email: mailParam,
+        code: latest.code,
+        date_time: latest.date_time,
+        subject: latest.subject
+      });
+    } else {
+      return jsonResponse({
+        status: "not_found",
+        message: `No ${platform} OTP found in recent emails.`,
+        email: mailParam
+      });
+    }
 
   } catch (e) {
     return jsonResponse({ error: e.message }, 500);
@@ -102,31 +129,19 @@ export async function handleOtpRequest(request) {
 
 async function callOorApi(params) {
   const url = new URL(BASE_URL);
-  
-  // Add standard params
   params.ip = "127.0.0.1";
   params.agent = "OOR_Mail_Client";
   
-  // Append params to URL
   Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
 
-  // Prepare Headers
   const headers = { "User-Agent": USER_AGENT };
-  
-  // CRITICAL FIX: Send the SID as a Cookie header too, otherwise set_email_user might not stick
+  // Important: Pass session ID as cookie for upstream
   if (params.sid_token) {
     headers["Cookie"] = `PHPSESSID=${params.sid_token}`;
   }
 
-  const response = await fetch(url, { 
-    method: "GET",
-    headers: headers 
-  });
-
-  if (!response.ok) {
-    throw new Error(`Upstream API Error: ${response.status}`);
-  }
-
+  const response = await fetch(url, { headers });
+  if (!response.ok) throw new Error(`Upstream HTTP ${response.status}`);
   return await response.json();
 }
 
@@ -146,11 +161,7 @@ function convertToIST(unixTimestamp) {
   return date.toLocaleString("en-IN", { 
     timeZone: "Asia/Kolkata", 
     hour12: true,
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
   });
 }
 
@@ -161,21 +172,39 @@ function unescapeHtml(str) {
     .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&nbsp;/g, " ");
 }
 
-// --- CORE EXTRACTION LOGIC ---
+// --- EXACT PYTHON REGEX PORT ---
+
+function extractZee5Subject(subject) {
+  const cleanSubject = unescapeHtml(subject || "");
+  // Python: r'^(\d{4})\s+is your ZEE5'
+  const match = cleanSubject.match(/^(\d{4})\s+is your ZEE5/);
+  return match ? match[1] : null;
+}
+
 function extractOtp(htmlContent, subject, platform) {
   const cleanHtml = unescapeHtml(htmlContent || "");
   const cleanSubject = unescapeHtml(subject || "");
   const textOnly = cleanHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 
   if (platform === 'zee5') {
+    // 1. Subject Check (Already done in optimization, but double check here safe)
     const subMatch = cleanSubject.match(/^(\d{4})\s+is your ZEE5/);
     if (subMatch) return subMatch[1];
+
+    // 2. Body Check
+    // Python: r'Password\(OTP\)\s+(\d{4})'
     const bodyMatch = textOnly.match(/Password\(OTP\)\s+(\d{4})/i);
     if (bodyMatch) return bodyMatch[1];
   } 
   else if (platform === 'netflix') {
+    // 1. HTML Class Check
+    // Python: r'class="[^"]*lrg-number[^"]*".*?>\s*(\d{4,6})\s*<'
+    // JS Regex dot (.) doesn't match newlines by default, use [\s\S]
     const htmlMatch = cleanHtml.match(/class="[^"]*lrg-number[^"]*".*?>\s*(\d{4,6})\s*</);
     if (htmlMatch) return htmlMatch[1];
+
+    // 2. Text Context Check
+    // Python: r'Enter this code.*?(\d{4})'
     const textMatch = textOnly.match(/Enter this code.*?(\d{4})/);
     if (textMatch) return textMatch[1];
   }
