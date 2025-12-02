@@ -465,6 +465,32 @@ async function handleProxy(request) {
   }
 }
 
+
+/* -------------------------------------------------------
+     NEW ROUTER — OTP
+--------------------------------------------------------*/
+
+import { handleOtpRequest } from './otp_handler.js'; // Import the separate logic
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // --- YOUR EXISTING ROUTES ---
+    // (If you have existing logic for "/", keep it here)
+
+    // --- NEW ROUTE ---
+    if (url.pathname === "/otp") {
+      // Delegate to the separate file
+      return await handleOtpRequest(request);
+    }
+
+    // --- DEFAULT RESPONSE ---
+    return new Response("OorMail Service is running.", { status: 200 });
+  },
+};
+
+
 /* -------------------------------------------------------
      MAIN ROUTER — clean, simple, safe
 --------------------------------------------------------*/
