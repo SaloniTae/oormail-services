@@ -1,5 +1,6 @@
 // --- CONFIGURATION ---
-const BASE_URL = "https://oormail-services.by-oor.workers.dev/ajax.php";
+// CHANGED: Point directly to the upstream API to avoid Error 1042 (Loop)
+const BASE_URL = "https://api.guerrillamail.com/ajax.php"; 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 // Main function to handle the OTP request
@@ -21,11 +22,14 @@ export async function handleOtpRequest(request) {
 
   try {
     // 2. Start Session (Get Token)
+    // We call get_email_address to initialize a session ID (sid_token)
     const sessionData = await callOorApi({ f: "get_email_address" });
     const sidToken = sessionData.sid_token;
-    if (!sidToken) throw new Error("Failed to initialize session (No sid_token).");
+    
+    if (!sidToken) throw new Error("Failed to initialize session (No sid_token returned).");
 
     // 3. Set the Manual Email User
+    // We must pass the sid_token so the server knows which session to update
     await callOorApi({ 
       f: "set_email_user", 
       email_user: userPart, 
@@ -54,7 +58,7 @@ export async function handleOtpRequest(request) {
     // 5. Slice the top 5 emails (New to Old)
     const topEmails = msgList.slice(0, 5);
 
-    // 6. Process all 5 emails concurrently (using Promise.all for speed)
+    // 6. Process all 5 emails concurrently
     const results = await Promise.all(topEmails.map(async (msg) => {
       const mailId = msg.mail_id;
       const subject = msg.mail_subject || "";
@@ -72,14 +76,13 @@ export async function handleOtpRequest(request) {
 
       return {
         mail_id: mailId,
-        code: otpCode, // Will be null if not found
+        code: otpCode, 
         subject: unescapeHtml(subject),
         date_time: convertToIST(timestamp)
       };
     }));
 
     // 7. Return JSON Response
-    // We check if at least one email had a code found to determine overall status
     const anyCodeFound = results.some(r => r.code !== null);
 
     return jsonResponse({
@@ -87,7 +90,7 @@ export async function handleOtpRequest(request) {
       platform: platform,
       email: mailParam,
       count: results.length,
-      messages: results // Array of 5 objects
+      messages: results
     });
 
   } catch (e) {
@@ -99,17 +102,40 @@ export async function handleOtpRequest(request) {
 
 async function callOorApi(params) {
   const url = new URL(BASE_URL);
+  
+  // Add standard params
   params.ip = "127.0.0.1";
-  params.agent = USER_AGENT;
+  params.agent = "OOR_Mail_Client";
+  
+  // Append params to URL
   Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
 
-  const response = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+  // Prepare Headers
+  const headers = { "User-Agent": USER_AGENT };
+  
+  // CRITICAL FIX: Send the SID as a Cookie header too, otherwise set_email_user might not stick
+  if (params.sid_token) {
+    headers["Cookie"] = `PHPSESSID=${params.sid_token}`;
+  }
+
+  const response = await fetch(url, { 
+    method: "GET",
+    headers: headers 
+  });
+
+  if (!response.ok) {
+    throw new Error(`Upstream API Error: ${response.status}`);
+  }
+
   return await response.json();
 }
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    headers: { 
+      "Content-Type": "application/json", 
+      "Access-Control-Allow-Origin": "*" 
+    },
     status: status
   });
 }
@@ -117,7 +143,6 @@ function jsonResponse(data, status = 200) {
 function convertToIST(unixTimestamp) {
   if (!unixTimestamp) return "Unavailable";
   const date = new Date(unixTimestamp * 1000);
-  // IST is UTC+5:30
   return date.toLocaleString("en-IN", { 
     timeZone: "Asia/Kolkata", 
     hour12: true,
@@ -138,8 +163,8 @@ function unescapeHtml(str) {
 
 // --- CORE EXTRACTION LOGIC ---
 function extractOtp(htmlContent, subject, platform) {
-  const cleanHtml = unescapeHtml(htmlContent);
-  const cleanSubject = unescapeHtml(subject);
+  const cleanHtml = unescapeHtml(htmlContent || "");
+  const cleanSubject = unescapeHtml(subject || "");
   const textOnly = cleanHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 
   if (platform === 'zee5') {
@@ -149,7 +174,6 @@ function extractOtp(htmlContent, subject, platform) {
     if (bodyMatch) return bodyMatch[1];
   } 
   else if (platform === 'netflix') {
-    // Matches HTML class or text context
     const htmlMatch = cleanHtml.match(/class="[^"]*lrg-number[^"]*".*?>\s*(\d{4,6})\s*</);
     if (htmlMatch) return htmlMatch[1];
     const textMatch = textOnly.match(/Enter this code.*?(\d{4})/);
