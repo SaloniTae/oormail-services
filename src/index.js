@@ -1,3 +1,8 @@
+import { handleOtpRequest } from './otp_handler.js';
+
+// === OOR Brand Name Generator with Upstash Redis storage ===
+// ... rest of your code ...
+
 // === OOR Brand Name Generator with Upstash Redis storage ===
 
 // Upstash Redis (raw, no env)
@@ -467,40 +472,20 @@ async function handleProxy(request) {
 
 
 /* -------------------------------------------------------
-     NEW ROUTER — OTP
+     MAIN UNIFIED ROUTER OTP + BRAND NAME
 --------------------------------------------------------*/
-
-import { handleOtpRequest } from './otp_handler.js'; // Import the separate logic
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const f = url.searchParams.get("f");
 
-    // --- YOUR EXISTING ROUTES ---
-    // (If you have existing logic for "/", keep it here)
-
-    // --- NEW ROUTE ---
+    // 1. Check for the OTP Route specifically
     if (url.pathname === "/otp") {
-      // Delegate to the separate file
       return await handleOtpRequest(request);
     }
 
-    // --- DEFAULT RESPONSE ---
-    return new Response("OorMail Service is running.", { status: 200 });
-  },
-};
-
-
-/* -------------------------------------------------------
-     MAIN ROUTER — clean, simple, safe
---------------------------------------------------------*/
-
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const f = url.searchParams.get("f");
-
-    // All our custom endpoints live on /ajax.php
+    // 2. Check for OOR Generator custom endpoints (/ajax.php?f=...)
     if (url.pathname.endsWith("/ajax.php")) {
       if (f === "generate_oor_name") {
         return handleGenerateOorName(request);
@@ -519,7 +504,7 @@ export default {
       }
     }
 
-    // Everything else → original GuerrillaMail proxy
+    // 3. If none of the above matched, use the original Proxy
     return handleProxy(request);
   }
 };
