@@ -46,6 +46,14 @@ export async function handleOtpRequest(request) {
         return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
       }
 
+      // FAPHOUSE STRICT RULE
+      if (platform === 'faphouse') {
+        const from = (msg.mail_from || "").toLowerCase();
+        // Check exact subject and specific sender
+        return sub === "Account confirmation" && from.includes("noreply@faphouse.com");
+      }
+      
+
       return false;
     });
 
@@ -104,6 +112,29 @@ export async function handleOtpRequest(request) {
           };
         }
       }
+
+      // --- FAPHOUSE LOGIC ---
+      if (platform === 'faphouse') {
+        const bodyData = await callOorApi({ 
+          f: "fetch_email", 
+          sid_token: sidToken, 
+          email_id: msg.mail_id 
+        });
+
+        const rawBody = bodyData.mail_body || "";
+        const link = extractFaphouseLink(rawBody);
+
+        if (link) {
+          return {
+            found: true,
+            code: link, // This returns the full URL
+            subject: unescapeHtml(subject),
+            date_time: convertToIST(msg.mail_timestamp),
+            timestamp: msg.mail_timestamp
+          };
+        }
+      }
+      
       return { found: false };
     });
 
@@ -176,14 +207,30 @@ function extractNetflixBody(htmlContent) {
   const textOnly = cleanHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 
   // 1. HTML Class Check (Standard Netflix Template)
-  // Checks for <div class="...lrg-number...">1234</div>
   const htmlMatch = cleanHtml.match(/class="[^"]*lrg-number[^"]*".*?>\s*(\d{4,6})\s*</);
   if (htmlMatch) return htmlMatch[1];
 
   // 2. Text Context Check (Fallback)
-  // Checks for "Enter this code ... 1234"
   const textMatch = textOnly.match(/Enter this code.*?(\d{4})/);
   if (textMatch) return textMatch[1];
 
   return null;
+}
+
+function extractFaphouseLink(rawBody) {
+  if (!rawBody) return null;
+
+  // 1. Remove Quoted-Printable soft line breaks
+  let clean = rawBody.replace(/=\r?\n/g, '');
+  
+  // 2. Decode Quoted-Printable characters (the 3D -> = fix)
+  clean = clean.replace(/=3D/g, '=');
+
+  // 3. Unescape HTML entities (the &amp; -> & fix)
+  clean = unescapeHtml(clean);
+
+  // 4. Regex to extract the specific link
+  const match = clean.match(/https:\/\/faphouse\.com\/auth\/confirm\?[^"\s<]+/);
+  
+  return match ? match[0] : null;
 }
