@@ -49,9 +49,14 @@ export async function handleOtpRequest(request) {
       // FAPHOUSE STRICT RULE
       if (platform === 'faphouse') {
         const from = (msg.mail_from || "").toLowerCase();
-        // Check exact subject and specific sender
-        return sub === "Account confirmation" && from.includes("noreply@faphouse.com");
+        // 1. Use regex for subject to handle potential hidden spaces/encoding
+        // 2. Loosen the 'from' check to catch 'FapHouse' or the email
+        const subjectMatch = /Account\s+confirmation/i.test(sub);
+        const fromMatch = from.includes("faphouse");
+        
+        return subjectMatch && fromMatch;
       }
+
       
 
       return false;
@@ -220,17 +225,19 @@ function extractNetflixBody(htmlContent) {
 function extractFaphouseLink(rawBody) {
   if (!rawBody) return null;
 
-  // 1. Remove Quoted-Printable soft line breaks
+  // 1. Remove soft line breaks (the "=" at the end of lines)
+  // This turns "fap=\r\nhouse" back into "faphouse"
   let clean = rawBody.replace(/=\r?\n/g, '');
   
-  // 2. Decode Quoted-Printable characters (the 3D -> = fix)
+  // 2. Fix the "3D" encoding (common in Quoted-Printable emails)
   clean = clean.replace(/=3D/g, '=');
 
-  // 3. Unescape HTML entities (the &amp; -> & fix)
+  // 3. Unescape HTML
   clean = unescapeHtml(clean);
 
-  // 4. Regex to extract the specific link
-  const match = clean.match(/https:\/\/faphouse\.com\/auth\/confirm\?[^"\s<]+/);
+  // 4. More aggressive Regex to find the link even if surrounded by text
+  const match = clean.match(/https:\/\/faphouse\.com\/auth\/confirm\?mode=[^\s"<']+/);
   
   return match ? match[0] : null;
 }
+
