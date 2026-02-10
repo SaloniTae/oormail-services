@@ -46,16 +46,14 @@ export async function handleOtpRequest(request) {
         return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
       }
 
-      // FAPHOUSE STRICT RULE
+      // FAPHOUSE AUTO-EXTRACT RULE
       if (platform === 'faphouse') {
         const from = (msg.mail_from || "").toLowerCase();
-        // 1. Use regex for subject to handle potential hidden spaces/encoding
-        // 2. Loosen the 'from' check to catch 'FapHouse' or the email
-        const subjectMatch = /Account\s+confirmation/i.test(sub);
-        const fromMatch = from.includes("faphouse");
-        
-        return subjectMatch && fromMatch;
+        const subject = (msg.mail_subject || "").toLowerCase();
+        // If it looks like faphouse, we take it.
+        return from.includes("faphouse") || subject.includes("account") || subject.includes("confirmation");
       }
+
 
       
 
@@ -225,19 +223,21 @@ function extractNetflixBody(htmlContent) {
 function extractFaphouseLink(rawBody) {
   if (!rawBody) return null;
 
-  // 1. Remove soft line breaks (the "=" at the end of lines)
-  // This turns "fap=\r\nhouse" back into "faphouse"
+  // 1. GLUE: Remove Quoted-Printable soft line breaks (= followed by newline)
+  // This is the most common reason links break in raw email data.
   let clean = rawBody.replace(/=\r?\n/g, '');
   
-  // 2. Fix the "3D" encoding (common in Quoted-Printable emails)
+  // 2. DECODE: Change "=3D" back into "=" 
   clean = clean.replace(/=3D/g, '=');
 
-  // 3. Unescape HTML
+  // 3. CLEAN: Unescape HTML entities (like &amp; or &gt;)
   clean = unescapeHtml(clean);
 
-  // 4. More aggressive Regex to find the link even if surrounded by text
-  const match = clean.match(/https:\/\/faphouse\.com\/auth\/confirm\?mode=[^\s"<']+/);
+  // 4. EXTRACT: Grab everything starting with auth/confirm until a boundary
+  // This regex looks for the URL and keeps going until it hits a quote, space, or bracket.
+  const match = clean.match(/https:\/\/faphouse\.com\/auth\/confirm[^\s"<']+/);
   
   return match ? match[0] : null;
 }
+
 
