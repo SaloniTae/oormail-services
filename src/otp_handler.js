@@ -1,11 +1,9 @@
 // --- CONFIGURATION & SECURITY ---
 const BASE_URL = "https://api.guerrillamail.com/ajax.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-// API KEY
 const MASTER_API_KEY = "OTTONTENT"; 
 
-// --- IN-MEMORY QUEUE MANAGER (Per Cloudflare Isolate) ---
+// --- IN-MEMORY QUEUE MANAGER ---
 const emailQueues = new Map();
 
 async function runQueuedTask(email, taskPromiseFn) {
@@ -35,13 +33,69 @@ async function runQueuedTask(email, taskPromiseFn) {
   return result;
 }
 
+// --- OTPAUTH POLYFILL (No npm install required) ---
+const OTPAuth = {
+  TOTP: class {
+    constructor({ issuer = "", algorithm = "SHA1", digits = 6, period = 30, secret }) {
+      // Map standard OTPAuth algorithms to Web Crypto API formats
+      this.algorithm = algorithm === 'SHA256' ? 'SHA-256' : algorithm === 'SHA512' ? 'SHA-512' : 'SHA-1';
+      this.digits = digits;
+      this.period = period;
+      this.secret = secret;
+      this.issuer = issuer;
+    }
+
+    async generate() {
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+      let bits = 0, value = 0, index = 0;
+      const decodedSecret = new Uint8Array((this.secret.length * 5) / 8);
+      
+      for (let i = 0; i < this.secret.length; i++) {
+        const char = this.secret.charAt(i).toUpperCase();
+        const val = alphabet.indexOf(char);
+        if (val === -1) continue; 
+        value = (value << 5) | val;
+        bits += 5;
+        if (bits >= 8) {
+          decodedSecret[index++] = (value >>> (bits - 8)) & 255;
+          bits -= 8;
+        }
+      }
+      
+      const decoded = decodedSecret.slice(0, index);
+      const epoch = Math.floor(Date.now() / 1000);
+      const timeStep = Math.floor(epoch / this.period);
+      
+      const timeBuffer = new ArrayBuffer(8);
+      const timeDataView = new DataView(timeBuffer);
+      timeDataView.setUint32(4, timeStep, false); 
+      
+      const key = await crypto.subtle.importKey(
+        "raw", decoded, { name: "HMAC", hash: { name: this.algorithm } }, false, ["sign"]
+      );
+      
+      const signature = await crypto.subtle.sign("HMAC", key, timeBuffer);
+      const hmacResult = new Uint8Array(signature);
+      
+      const offset = hmacResult[hmacResult.length - 1] & 0xf;
+      const binary =
+        ((hmacResult[offset] & 0x7f) << 24) |
+        ((hmacResult[offset + 1] & 0xff) << 16) |
+        ((hmacResult[offset + 2] & 0xff) << 8) |
+        (hmacResult[offset + 3] & 0xff);
+        
+      const divisor = Math.pow(10, this.digits);
+      return (binary % divisor).toString().padStart(this.digits, '0');
+    }
+  }
+};
+
 // --- MAIN ROUTER ---
 export async function handleOtpRequest(request) {
   const url = new URL(request.url);
   const path = url.pathname;
   const platformParam = (url.searchParams.get("platform") || "").toLowerCase();
 
-  // Handle CORS preflight
   if (request.method === "OPTIONS") {
     return new Response(null, {
       headers: {
@@ -52,19 +106,14 @@ export async function handleOtpRequest(request) {
     });
   }
   
-  // 1. Authenticate Request
   const providedKey = request.headers.get("x-api-key");
   if (providedKey !== MASTER_API_KEY) {
     return jsonResponse({ error: "Unauthorized access." }, 401);
   }
 
-  // 2. Route Request based on Path and Platform parameter
   if (path.endsWith("/otp")) {
-    if (platformParam === "netflix") {
-      return await processNetflix(url);
-    } else if (platformParam === "primevideo") {
-      return await processPrimeTotp(request, url);
-    }
+    if (platformParam === "netflix") return await processNetflix(url);
+    if (platformParam === "primevideo") return await processPrimeTotp(request, url);
     return jsonResponse({ error: "Missing or unsupported platform parameter." }, 400);
   } 
   
@@ -78,11 +127,9 @@ export async function handleOtpRequest(request) {
 // --- NETFLIX LOGIC ---
 async function processNetflix(url) {
   const mailParam = url.searchParams.get("mail");
-  const useQueue = url.searchParams.get("queue") === "true"; // Pass &queue=true to enable queue
+  const useQueue = url.searchParams.get("queue") === "true"; 
 
-  if (!mailParam || !mailParam.includes("@")) {
-    return jsonResponse({ error: "Invalid email." }, 400);
-  }
+  if (!mailParam || !mailParam.includes("@")) return jsonResponse({ error: "Invalid email." }, 400);
 
   const userPart = mailParam.split("@")[0].toLowerCase();
 
@@ -103,9 +150,7 @@ async function processNetflix(url) {
       return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
     });
 
-    if (candidates.length === 0) {
-      return jsonResponse({ status: "not_found", message: "No Netflix OTP emails found." });
-    }
+    if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No Netflix OTP emails found." });
 
     const topCandidates = candidates.slice(0, 3);
     const promises = topCandidates.map(async (msg) => {
@@ -143,47 +188,45 @@ async function processNetflix(url) {
   };
 
   try {
-    if (useQueue) {
-      return await runQueuedTask(mailParam, fetchLogic);
-    } else {
-      return await fetchLogic();
-    }
+    if (useQueue) return await runQueuedTask(mailParam, fetchLogic);
+    return await fetchLogic();
   } catch (e) {
     return jsonResponse({ error: e.message }, 500);
   }
 }
 
-// --- PRIME VIDEO TOTP LOGIC (Dynamic Secret & Always Fresh 30s) ---
+// --- PRIME VIDEO TOTP LOGIC (Using OTPAuth Polyfill) ---
 async function processPrimeTotp(request, url) {
   try {
     let secret = null;
 
-    // 1. Try to get secret from JSON payload (POST request - Most Secure)
     if (request.method === "POST") {
       const payload = await request.json();
       secret = payload.secret;
-    } 
-    // 2. Fallback to getting secret from URL parameters (GET request - /otp?platform=primevideo&secret=XYZ)
-    else if (request.method === "GET") {
+    } else if (request.method === "GET") {
       secret = url.searchParams.get("secret");
     }
 
-    if (!secret) {
-      return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
-    }
+    if (!secret) return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
 
-    // Calculate time remaining in the current global 30s window
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
 
-    // Pause request if less than 28 seconds remain to ensure full 30s code lifespan
     if (msRemaining < 28000) {
        await new Promise(resolve => setTimeout(resolve, msRemaining));
     }
 
-    // Generate fresh code dynamically from the provided secret
-    const otpCode = await generateSecureTotp(secret, "SHA-256");
+    // Creating the TOTP instance exactly like the official otpauth library
+    const totp = new OTPAuth.TOTP({
+      issuer: "your-app.com",
+      algorithm: "SHA256", // Handles SHA256 per your requirement
+      digits: 6,
+      period: 30,
+      secret: secret 
+    });
+
+    const otpCode = await totp.generate();
 
     return jsonResponse({
       id: crypto.randomUUID(),
@@ -198,7 +241,7 @@ async function processPrimeTotp(request, url) {
       details: e.message || "Unknown cryptographic or parsing error" 
     }, 500);
   }
-
+}
 
 // --- HELPERS & EXTRACTION ---
 async function callOorApi(params) {
@@ -215,10 +258,7 @@ async function callOorApi(params) {
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
-    headers: { 
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*" 
-    },
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     status: status
   });
 }
@@ -242,50 +282,4 @@ function extractNetflixBody(htmlContent) {
   const textMatch = textOnly.match(/Enter this code.*?(\d{4,6})/);
   if (textMatch) return textMatch[1];
   return null;
-}
-
-// --- CRYPTO LOGIC FOR TOTP ---
-async function generateSecureTotp(secretBase32, algorithm = "SHA-256") {
-  const decodedSecret = base32ToUint8Array(secretBase32);
-  const epoch = Math.floor(Date.now() / 1000);
-  const timeStep = Math.floor(epoch / 30);
-  
-  const timeBuffer = new ArrayBuffer(8);
-  const timeDataView = new DataView(timeBuffer);
-  timeDataView.setUint32(4, timeStep, false); 
-  
-  const key = await crypto.subtle.importKey(
-    "raw", decodedSecret, { name: "HMAC", hash: { name: algorithm } }, false, ["sign"]
-  );
-  
-  const signature = await crypto.subtle.sign("HMAC", key, timeBuffer);
-  const hmacResult = new Uint8Array(signature);
-  
-  const offset = hmacResult[hmacResult.length - 1] & 0xf;
-  const binary =
-    ((hmacResult[offset] & 0x7f) << 24) |
-    ((hmacResult[offset + 1] & 0xff) << 16) |
-    ((hmacResult[offset + 2] & 0xff) << 8) |
-    (hmacResult[offset + 3] & 0xff);
-    
-  return (binary % 1000000).toString().padStart(6, '0');
-}
-
-function base32ToUint8Array(base32) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let bits = 0, value = 0, index = 0;
-  const output = new Uint8Array((base32.length * 5) / 8);
-
-  for (let i = 0; i < base32.length; i++) {
-    const char = base32.charAt(i).toUpperCase();
-    const val = alphabet.indexOf(char);
-    if (val === -1) continue; 
-    value = (value << 5) | val;
-    bits += 5;
-    if (bits >= 8) {
-      output[index++] = (value >>> (bits - 8)) & 255;
-      bits -= 8;
-    }
-  }
-  return output.slice(0, index);
 }
