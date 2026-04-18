@@ -193,9 +193,12 @@ async function processPrimeTotp(request, url) {
     });
 
   } catch (e) {
-    return jsonResponse({ error: "Failed to generate TOTP" }, 500);
+    return jsonResponse({ 
+      error: "Failed to generate TOTP", 
+      details: e.message || "Unknown cryptographic or parsing error" 
+    }, 500);
   }
-}
+
 
 // --- HELPERS & EXTRACTION ---
 async function callOorApi(params) {
