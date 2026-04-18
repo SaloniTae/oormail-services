@@ -5,13 +5,6 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // API KEY
 const MASTER_API_KEY = "OTTONTENT"; 
 
-// SERVER-SIDE SECRETS (Using random strings as requested)
-// The frontend only sends "8f7d-c4ff093bcd39", keeping the secret completely hidden.
-const PRIME_TOTP_SECRETS = {
-  "e2cb7165-55a5-44ce-8f7d-c4ff093bcd39": "2OLRLATN3OQZOCPA", 
-  "a1b2c3d4-e5f6-7890-1234-abcdefabcdef": "ANOTHERSECRET123"
-};
-
 // --- IN-MEMORY QUEUE MANAGER (Per Cloudflare Isolate) ---
 const emailQueues = new Map();
 
@@ -42,41 +35,39 @@ async function runQueuedTask(email, taskPromiseFn) {
   return result;
 }
 
-// --- CLOUDFLARE WORKER ENTRY POINT ---
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+// --- RESTORED NAMED EXPORT FOR index.js ---
+export async function handleOtpRequest(request) {
+  const url = new URL(request.url);
+  const path = url.pathname;
 
-    // Handle CORS preflight
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, x-api-key"
-        }
-      });
-    }
-    
-    // 1. Authenticate Request
-    const providedKey = request.headers.get("x-api-key");
-    if (providedKey !== MASTER_API_KEY) {
-      return jsonResponse({ error: "Unauthorized access." }, 401);
-    }
-
-    // 2. Route Request
-    if (path === "/api/netflix" && request.method === "GET") {
-      return await processNetflix(url);
-    } else if (path === "/api/prime-totp" && request.method === "POST") {
-      return await processPrimeTotp(request);
-    }
-
-    return jsonResponse({ error: "Endpoint not found." }, 404);
+  // Handle CORS preflight if your index.js passes OPTIONS requests here
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, x-api-key"
+      }
+    });
   }
-};
+  
+  // 1. Authenticate Request
+  const providedKey = request.headers.get("x-api-key");
+  if (providedKey !== MASTER_API_KEY) {
+    return jsonResponse({ error: "Unauthorized access." }, 401);
+  }
 
-// --- NETFLIX LOGIC (Original Logic Intact) ---
+  // 2. Route Request
+  if (path === "/api/netflix" && request.method === "GET") {
+    return await processNetflix(url);
+  } else if (path === "/api/prime-totp" && request.method === "POST") {
+    return await processPrimeTotp(request);
+  }
+
+  return jsonResponse({ error: "Endpoint not found." }, 404);
+}
+
+// --- NETFLIX LOGIC ---
 async function processNetflix(url) {
   const mailParam = url.searchParams.get("mail");
   const useQueue = url.searchParams.get("queue") === "true";
@@ -102,7 +93,7 @@ async function processNetflix(url) {
 
     if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
 
-    // 4. Strict Subject Filtering (Original Logic)
+    // 4. Strict Subject Filtering
     const candidates = msgList.filter(msg => {
       const sub = (msg.mail_subject || "").trim();
       return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
@@ -159,32 +150,27 @@ async function processNetflix(url) {
   }
 }
 
-// --- PRIME VIDEO TOTP LOGIC (Always Fresh 30s) ---
+// --- PRIME VIDEO TOTP LOGIC (Dynamic Payload & Always Fresh 30s) ---
 async function processPrimeTotp(request) {
   try {
     const payload = await request.json();
-    const accountId = payload.account_id;
+    const secret = payload.secret; // Dynamically passed from your secure backend
     
-    if (!accountId || !PRIME_TOTP_SECRETS[accountId]) {
-      return jsonResponse({ error: "Invalid or missing account mapping." }, 400);
+    if (!secret) {
+      return jsonResponse({ error: "Missing secret in request payload." }, 400);
     }
-
-    const secret = PRIME_TOTP_SECRETS[accountId];
 
     // 1. Calculate time remaining in the current global 30s window
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
 
-    // 2. If the code has less than 28 seconds of life left, wait for a fresh one.
-    // (We use 28s to account for tiny network latency, ensuring it feels instant 
-    // if they happen to click right as a new window begins).
+    // 2. Pause request if less than 28 seconds remain
     if (msRemaining < 28000) {
-       // Asynchronously pause this specific request until the new 30s window starts
        await new Promise(resolve => setTimeout(resolve, msRemaining));
     }
 
-    // 3. Generate the code (it will now be based on the brand new time step)
+    // 3. Generate fresh code dynamically
     const otpCode = await generateSecureTotp(secret, "SHA-256");
 
     return jsonResponse({
@@ -199,7 +185,7 @@ async function processPrimeTotp(request) {
 }
 
 
-// --- HELPERS & EXTRACTION (Original Logic Intact) ---
+// --- HELPERS & EXTRACTION ---
 async function callOorApi(params) {
   const url = new URL(BASE_URL);
   params.ip = "127.0.0.1"; params.agent = "OOR_Mail_Client";
