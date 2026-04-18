@@ -195,7 +195,7 @@ async function processNetflix(url) {
   }
 }
 
-// --- PRIME VIDEO TOTP LOGIC (Instant Resolution) ---
+// --- PRIME VIDEO TOTP LOGIC (Reverted: Waits for Fresh 30s) ---
 async function processPrimeTotp(request, url) {
   try {
     let secret = null;
@@ -209,14 +209,17 @@ async function processPrimeTotp(request, url) {
 
     if (!secret) return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
 
-    // CRITICAL FIX: Clean the secret to remove spaces or invalid characters that crash the crypto engine
+    // CRITICAL FIX RETAINED: Clean the secret to prevent crypto engine crashes
     secret = String(secret).replace(/\s+/g, '').replace(/[^A-Z2-7]/gi, '');
 
-    // Calculate exact time remaining instantly without pausing the server
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
-    const secondsRemaining = Math.floor(msRemaining / 1000);
+
+    // RESTORED WAIT LOGIC: Pause request if less than 28 seconds remain
+    if (msRemaining < 28000) {
+       await new Promise(resolve => setTimeout(resolve, msRemaining));
+    }
 
     // Creating the TOTP instance
     const totp = new OTPAuth.TOTP({
@@ -233,7 +236,7 @@ async function processPrimeTotp(request, url) {
       id: crypto.randomUUID(),
       platform: "primevideo",
       otp: otpCode,
-      expires_in_seconds: secondsRemaining 
+      expiresAt: "30s" 
     });
 
   } catch (e) {
@@ -243,6 +246,7 @@ async function processPrimeTotp(request, url) {
     }, 500);
   }
 }
+
 
 
 // --- HELPERS & EXTRACTION ---
