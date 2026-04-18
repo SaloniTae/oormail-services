@@ -195,7 +195,7 @@ async function processNetflix(url) {
   }
 }
 
-// --- PRIME VIDEO TOTP LOGIC (Using OTPAuth Polyfill) ---
+// --- PRIME VIDEO TOTP LOGIC (Instant Resolution) ---
 async function processPrimeTotp(request, url) {
   try {
     let secret = null;
@@ -209,18 +209,19 @@ async function processPrimeTotp(request, url) {
 
     if (!secret) return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
 
+    // CRITICAL FIX: Clean the secret to remove spaces or invalid characters that crash the crypto engine
+    secret = String(secret).replace(/\s+/g, '').replace(/[^A-Z2-7]/gi, '');
+
+    // Calculate exact time remaining instantly without pausing the server
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
+    const secondsRemaining = Math.floor(msRemaining / 1000);
 
-    if (msRemaining < 28000) {
-       await new Promise(resolve => setTimeout(resolve, msRemaining));
-    }
-
-    // Creating the TOTP instance exactly like the official otpauth library
+    // Creating the TOTP instance
     const totp = new OTPAuth.TOTP({
       issuer: "your-app.com",
-      algorithm: "SHA256", // Handles SHA256 per your requirement
+      algorithm: "SHA256", 
       digits: 6,
       period: 30,
       secret: secret 
@@ -232,7 +233,7 @@ async function processPrimeTotp(request, url) {
       id: crypto.randomUUID(),
       platform: "primevideo",
       otp: otpCode,
-      expiresAt: "30s"
+      expires_in_seconds: secondsRemaining 
     });
 
   } catch (e) {
@@ -242,6 +243,7 @@ async function processPrimeTotp(request, url) {
     }, 500);
   }
 }
+
 
 // --- HELPERS & EXTRACTION ---
 async function callOorApi(params) {
