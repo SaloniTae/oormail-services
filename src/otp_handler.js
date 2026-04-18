@@ -1,0 +1,290 @@
+// --- CONFIGURATION & SECURITY ---
+const BASE_URL = "https://api.guerrillamail.com/ajax.php";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// API KEY
+const MASTER_API_KEY = "OTTONTENT"; 
+
+// SERVER-SIDE SECRETS (Using random strings as requested)
+// The frontend only sends "8f7d-c4ff093bcd39", keeping the secret completely hidden.
+const PRIME_TOTP_SECRETS = {
+  "e2cb7165-55a5-44ce-8f7d-c4ff093bcd39": "2OLRLATN3OQZOCPA", 
+  "a1b2c3d4-e5f6-7890-1234-abcdefabcdef": "ANOTHERSECRET123"
+};
+
+// --- IN-MEMORY QUEUE MANAGER (Per Cloudflare Isolate) ---
+const emailQueues = new Map();
+
+async function runQueuedTask(email, taskPromiseFn) {
+  if (!emailQueues.has(email)) {
+    emailQueues.set(email, Promise.resolve());
+  }
+  
+  let result, error;
+  const previousTask = emailQueues.get(email);
+  
+  const nextTask = previousTask.then(async () => {
+    try {
+      result = await taskPromiseFn();
+    } catch (e) {
+      error = e;
+    }
+  });
+  
+  emailQueues.set(email, nextTask);
+  await nextTask;
+  
+  if (emailQueues.get(email) === nextTask) {
+    emailQueues.delete(email);
+  }
+  
+  if (error) throw error;
+  return result;
+}
+
+// --- CLOUDFLARE WORKER ENTRY POINT ---
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, x-api-key"
+        }
+      });
+    }
+    
+    // 1. Authenticate Request
+    const providedKey = request.headers.get("x-api-key");
+    if (providedKey !== MASTER_API_KEY) {
+      return jsonResponse({ error: "Unauthorized access." }, 401);
+    }
+
+    // 2. Route Request
+    if (path === "/api/netflix" && request.method === "GET") {
+      return await processNetflix(url);
+    } else if (path === "/api/prime-totp" && request.method === "POST") {
+      return await processPrimeTotp(request);
+    }
+
+    return jsonResponse({ error: "Endpoint not found." }, 404);
+  }
+};
+
+// --- NETFLIX LOGIC (Original Logic Intact) ---
+async function processNetflix(url) {
+  const mailParam = url.searchParams.get("mail");
+  const useQueue = url.searchParams.get("queue") === "true";
+
+  if (!mailParam || !mailParam.includes("@")) {
+    return jsonResponse({ error: "Invalid email." }, 400);
+  }
+
+  const userPart = mailParam.split("@")[0].toLowerCase();
+
+  const fetchLogic = async () => {
+    // 1. Init Session
+    const sessionData = await callOorApi({ f: "get_email_address" });
+    const sidToken = sessionData.sid_token;
+    if (!sidToken) throw new Error("No session token.");
+
+    // 2. Set User
+    await callOorApi({ f: "set_email_user", email_user: userPart, sid_token: sidToken });
+
+    // 3. Get Inbox List
+    const inboxData = await callOorApi({ f: "get_email_list", sid_token: sidToken, offset: 0 });
+    const msgList = inboxData.list || [];
+
+    if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
+
+    // 4. Strict Subject Filtering (Original Logic)
+    const candidates = msgList.filter(msg => {
+      const sub = (msg.mail_subject || "").trim();
+      return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
+    });
+
+    if (candidates.length === 0) {
+      return jsonResponse({ status: "not_found", message: "No Netflix OTP emails found." });
+    }
+
+    // 5. Process Candidates
+    const topCandidates = candidates.slice(0, 3);
+    const promises = topCandidates.map(async (msg) => {
+      const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
+      const rawBody = bodyData.mail_body || "";
+      const code = extractNetflixBody(rawBody);
+
+      if (code) {
+        return {
+          found: true,
+          code: code,
+          subject: unescapeHtml(msg.mail_subject || ""),
+          date_time: convertToIST(msg.mail_timestamp),
+          timestamp: msg.mail_timestamp
+        };
+      }
+      return { found: false };
+    });
+
+    const results = await Promise.all(promises);
+    const validResults = results.filter(r => r.found).sort((a, b) => b.timestamp - a.timestamp);
+
+    if (validResults.length > 0) {
+      const latest = validResults[0];
+      return jsonResponse({
+        status: "success",
+        platform: "netflix",
+        email: mailParam,
+        code: latest.code,
+        date_time: latest.date_time
+      });
+    }
+
+    return jsonResponse({ status: "not_found", message: "Extraction failed." });
+  };
+
+  try {
+    if (useQueue) {
+      return await runQueuedTask(mailParam, fetchLogic);
+    } else {
+      return await fetchLogic();
+    }
+  } catch (e) {
+    return jsonResponse({ error: e.message }, 500);
+  }
+}
+
+// --- PRIME VIDEO TOTP LOGIC (Always Fresh 30s) ---
+async function processPrimeTotp(request) {
+  try {
+    const payload = await request.json();
+    const accountId = payload.account_id;
+    
+    if (!accountId || !PRIME_TOTP_SECRETS[accountId]) {
+      return jsonResponse({ error: "Invalid or missing account mapping." }, 400);
+    }
+
+    const secret = PRIME_TOTP_SECRETS[accountId];
+
+    // 1. Calculate time remaining in the current global 30s window
+    const msSinceEpoch = Date.now();
+    const msIntoWindow = msSinceEpoch % 30000;
+    const msRemaining = 30000 - msIntoWindow;
+
+    // 2. If the code has less than 28 seconds of life left, wait for a fresh one.
+    // (We use 28s to account for tiny network latency, ensuring it feels instant 
+    // if they happen to click right as a new window begins).
+    if (msRemaining < 28000) {
+       // Asynchronously pause this specific request until the new 30s window starts
+       await new Promise(resolve => setTimeout(resolve, msRemaining));
+    }
+
+    // 3. Generate the code (it will now be based on the brand new time step)
+    const otpCode = await generateSecureTotp(secret, "SHA-256");
+
+    return jsonResponse({
+      id: crypto.randomUUID(),
+      otp: otpCode,
+      expiresAt: "30s"
+    });
+
+  } catch (e) {
+    return jsonResponse({ error: "Failed to generate TOTP" }, 500);
+  }
+}
+
+
+// --- HELPERS & EXTRACTION (Original Logic Intact) ---
+async function callOorApi(params) {
+  const url = new URL(BASE_URL);
+  params.ip = "127.0.0.1"; params.agent = "OOR_Mail_Client";
+  Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
+  
+  const headers = { "User-Agent": USER_AGENT };
+  if (params.sid_token) headers["Cookie"] = `PHPSESSID=${params.sid_token}`;
+
+  const response = await fetch(url, { headers });
+  return await response.json();
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: { 
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*" 
+    },
+    status: status
+  });
+}
+
+function convertToIST(unixTimestamp) {
+  if (!unixTimestamp) return "Unavailable";
+  const date = new Date(unixTimestamp * 1000);
+  return date.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: true });
+}
+
+function unescapeHtml(str) {
+  if (!str) return "";
+  return str.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+function extractNetflixBody(htmlContent) {
+  const cleanHtml = unescapeHtml(htmlContent || "");
+  const textOnly = cleanHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const htmlMatch = cleanHtml.match(/class="[^"]*lrg-number[^"]*".*?>\s*(\d{4,6})\s*</);
+  if (htmlMatch) return htmlMatch[1];
+  const textMatch = textOnly.match(/Enter this code.*?(\d{4,6})/);
+  if (textMatch) return textMatch[1];
+  return null;
+}
+
+// --- CRYPTO LOGIC FOR TOTP ---
+async function generateSecureTotp(secretBase32, algorithm = "SHA-256") {
+  const decodedSecret = base32ToUint8Array(secretBase32);
+  const epoch = Math.floor(Date.now() / 1000);
+  const timeStep = Math.floor(epoch / 30);
+  
+  const timeBuffer = new ArrayBuffer(8);
+  const timeDataView = new DataView(timeBuffer);
+  timeDataView.setUint32(4, timeStep, false); 
+  
+  const key = await crypto.subtle.importKey(
+    "raw", decodedSecret, { name: "HMAC", hash: { name: algorithm } }, false, ["sign"]
+  );
+  
+  const signature = await crypto.subtle.sign("HMAC", key, timeBuffer);
+  const hmacResult = new Uint8Array(signature);
+  
+  const offset = hmacResult[hmacResult.length - 1] & 0xf;
+  const binary =
+    ((hmacResult[offset] & 0x7f) << 24) |
+    ((hmacResult[offset + 1] & 0xff) << 16) |
+    ((hmacResult[offset + 2] & 0xff) << 8) |
+    (hmacResult[offset + 3] & 0xff);
+    
+  return (binary % 1000000).toString().padStart(6, '0');
+}
+
+function base32ToUint8Array(base32) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0, value = 0, index = 0;
+  const output = new Uint8Array((base32.length * 5) / 8);
+
+  for (let i = 0; i < base32.length; i++) {
+    const char = base32.charAt(i).toUpperCase();
+    const val = alphabet.indexOf(char);
+    if (val === -1) continue; 
+    value = (value << 5) | val;
+    bits += 5;
+    if (bits >= 8) {
+      output[index++] = (value >>> (bits - 8)) & 255;
+      bits -= 8;
+    }
+  }
+  return output.slice(0, index);
+}
