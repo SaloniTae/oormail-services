@@ -35,12 +35,13 @@ async function runQueuedTask(email, taskPromiseFn) {
   return result;
 }
 
-// --- RESTORED NAMED EXPORT FOR index.js ---
+// --- MAIN ROUTER ---
 export async function handleOtpRequest(request) {
   const url = new URL(request.url);
   const path = url.pathname;
+  const platformParam = (url.searchParams.get("platform") || "").toLowerCase();
 
-  // Handle CORS preflight if your index.js passes OPTIONS requests here
+  // Handle CORS preflight
   if (request.method === "OPTIONS") {
     return new Response(null, {
       headers: {
@@ -57,11 +58,18 @@ export async function handleOtpRequest(request) {
     return jsonResponse({ error: "Unauthorized access." }, 401);
   }
 
-  // 2. Route Request
-  if (path === "/api/netflix" && request.method === "GET") {
-    return await processNetflix(url);
-  } else if (path === "/api/prime-totp" && request.method === "POST") {
-    return await processPrimeTotp(request);
+  // 2. Route Request based on Path and Platform parameter
+  if (path.endsWith("/otp")) {
+    if (platformParam === "netflix") {
+      return await processNetflix(url);
+    } else if (platformParam === "primevideo") {
+      return await processPrimeTotp(request, url);
+    }
+    return jsonResponse({ error: "Missing or unsupported platform parameter." }, 400);
+  } 
+  
+  if (path.endsWith("/prime-totp")) {
+    return await processPrimeTotp(request, url);
   }
 
   return jsonResponse({ error: "Endpoint not found." }, 404);
@@ -70,7 +78,7 @@ export async function handleOtpRequest(request) {
 // --- NETFLIX LOGIC ---
 async function processNetflix(url) {
   const mailParam = url.searchParams.get("mail");
-  const useQueue = url.searchParams.get("queue") === "true";
+  const useQueue = url.searchParams.get("queue") === "true"; // Pass &queue=true to enable queue
 
   if (!mailParam || !mailParam.includes("@")) {
     return jsonResponse({ error: "Invalid email." }, 400);
@@ -79,21 +87,17 @@ async function processNetflix(url) {
   const userPart = mailParam.split("@")[0].toLowerCase();
 
   const fetchLogic = async () => {
-    // 1. Init Session
     const sessionData = await callOorApi({ f: "get_email_address" });
     const sidToken = sessionData.sid_token;
     if (!sidToken) throw new Error("No session token.");
 
-    // 2. Set User
     await callOorApi({ f: "set_email_user", email_user: userPart, sid_token: sidToken });
 
-    // 3. Get Inbox List
     const inboxData = await callOorApi({ f: "get_email_list", sid_token: sidToken, offset: 0 });
     const msgList = inboxData.list || [];
 
     if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
 
-    // 4. Strict Subject Filtering
     const candidates = msgList.filter(msg => {
       const sub = (msg.mail_subject || "").trim();
       return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
@@ -103,7 +107,6 @@ async function processNetflix(url) {
       return jsonResponse({ status: "not_found", message: "No Netflix OTP emails found." });
     }
 
-    // 5. Process Candidates
     const topCandidates = candidates.slice(0, 3);
     const promises = topCandidates.map(async (msg) => {
       const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
@@ -150,31 +153,41 @@ async function processNetflix(url) {
   }
 }
 
-// --- PRIME VIDEO TOTP LOGIC (Dynamic Payload & Always Fresh 30s) ---
-async function processPrimeTotp(request) {
+// --- PRIME VIDEO TOTP LOGIC (Dynamic Secret & Always Fresh 30s) ---
+async function processPrimeTotp(request, url) {
   try {
-    const payload = await request.json();
-    const secret = payload.secret; // Dynamically passed from your secure backend
-    
-    if (!secret) {
-      return jsonResponse({ error: "Missing secret in request payload." }, 400);
+    let secret = null;
+
+    // 1. Try to get secret from JSON payload (POST request - Most Secure)
+    if (request.method === "POST") {
+      const payload = await request.json();
+      secret = payload.secret;
+    } 
+    // 2. Fallback to getting secret from URL parameters (GET request - /otp?platform=primevideo&secret=XYZ)
+    else if (request.method === "GET") {
+      secret = url.searchParams.get("secret");
     }
 
-    // 1. Calculate time remaining in the current global 30s window
+    if (!secret) {
+      return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
+    }
+
+    // Calculate time remaining in the current global 30s window
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
 
-    // 2. Pause request if less than 28 seconds remain
+    // Pause request if less than 28 seconds remain to ensure full 30s code lifespan
     if (msRemaining < 28000) {
        await new Promise(resolve => setTimeout(resolve, msRemaining));
     }
 
-    // 3. Generate fresh code dynamically
+    // Generate fresh code dynamically from the provided secret
     const otpCode = await generateSecureTotp(secret, "SHA-256");
 
     return jsonResponse({
       id: crypto.randomUUID(),
+      platform: "primevideo",
       otp: otpCode,
       expiresAt: "30s"
     });
@@ -183,7 +196,6 @@ async function processPrimeTotp(request) {
     return jsonResponse({ error: "Failed to generate TOTP" }, 500);
   }
 }
-
 
 // --- HELPERS & EXTRACTION ---
 async function callOorApi(params) {
