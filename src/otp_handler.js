@@ -195,6 +195,7 @@ async function processNetflix(url) {
   }
 }
 
+
 // --- PRIME VIDEO TOTP LOGIC (Reverted: Waits for Fresh 30s) ---
 async function processPrimeTotp(request, url) {
   try {
@@ -209,22 +210,22 @@ async function processPrimeTotp(request, url) {
 
     if (!secret) return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
 
-    // CRITICAL FIX RETAINED: Clean the secret to prevent crypto engine crashes
+    // Clean the secret to prevent crypto engine crashes
     secret = String(secret).replace(/\s+/g, '').replace(/[^A-Z2-7]/gi, '');
 
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
 
-    // RESTORED WAIT LOGIC: Pause request if less than 28 seconds remain
+    // Pause request if less than 28 seconds remain
     if (msRemaining < 28000) {
        await new Promise(resolve => setTimeout(resolve, msRemaining));
     }
 
-    // Creating the TOTP instance
+    // Creating the TOTP instance using the standard algorithm expected by Amazon
     const totp = new OTPAuth.TOTP({
       issuer: "your-app.com",
-      algorithm: "SHA256", 
+      algorithm: "SHA1", 
       digits: 6,
       period: 30,
       secret: secret 
@@ -246,6 +247,7 @@ async function processPrimeTotp(request, url) {
     }, 500);
   }
 }
+
 
 
 
