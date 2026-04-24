@@ -128,6 +128,8 @@ export async function handleOtpRequest(request) {
   return jsonResponse({ error: "Endpoint not found." }, 404);
 }
 
+
+
 // --- NETFLIX LOGIC (Unified Standard & Household) ---
 async function processNetflix(url, isHousehold = false) {
   const mailParam = url.searchParams.get("mail");
@@ -158,12 +160,12 @@ async function processNetflix(url, isHousehold = false) {
         return sub.includes("temporary access") || 
                excerpt.includes("temporary access") || 
                excerpt.includes("netflix") ||
-               sub === ""; // Catches heavily forwarded emails
+               sub === ""; 
       } else {
         return sub.includes("sign-in code") || 
                excerpt.includes("sign-in") || 
                excerpt.includes("netflix") ||
-               sub === ""; // Catches heavily forwarded emails
+               sub === ""; 
       }
     });
 
@@ -181,35 +183,43 @@ async function processNetflix(url, isHousehold = false) {
         // Clean quoted-printable artifacts to reveal the true text
         rawBody = rawBody.replace(/=\r?\n/g, '').replace(/=3D/g, '=').replace(/&amp;/g, '&');
         
-        // 2. DEEP VERIFICATION: Find the unique travel link directly, bypassing strict text sender checks
+        // 2. DEEP VERIFICATION: Find the unique travel link
         const linkMatch = rawBody.match(/https:\/\/(?:www\.)?netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
 
-        if (linkMatch) {
-          const travelUrl = linkMatch[0];
-          try {
-            const netflixRes = await fetch(travelUrl, {
-              headers: { 
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-              }
-            });
-            const netflixHtml = await netflixRes.text();
-            const code = extractNetflixHouseholdCode(netflixHtml);
-
-            if (code) {
-              return {
-                found: true,
-                code: code,
-                subject: subject || "Netflix Household Code (Forwarded)", 
-                date_time: convertToIST(msg.mail_timestamp),
-                timestamp: msg.mail_timestamp
-              };
-            }
-          } catch (e) {
-            // Silently fail to let the next candidate attempt extraction
-          }
+        if (!linkMatch) {
+            return { found: false, debug_reason: "Travel URL not found in email body.", body_snippet: rawBody.substring(0, 250) };
         }
-        return { found: false };
+
+        const travelUrl = linkMatch[0];
+        try {
+          const netflixRes = await fetch(travelUrl, {
+            headers: { 
+              "User-Agent": USER_AGENT,
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            }
+          });
+          const netflixHtml = await netflixRes.text();
+          const code = extractNetflixHouseholdCode(netflixHtml);
+
+          if (code) {
+            return {
+              found: true,
+              code: code,
+              subject: subject || "Netflix Household Code (Forwarded)", 
+              date_time: convertToIST(msg.mail_timestamp),
+              timestamp: msg.mail_timestamp
+            };
+          } else {
+            return { 
+                found: false, 
+                debug_reason: "URL fetched, but code extraction failed. Netflix might be blocking the Worker.", 
+                url_fetched: travelUrl,
+                html_snippet: netflixHtml.substring(0, 350) 
+            };
+          }
+        } catch (e) {
+          return { found: false, debug_reason: "Fetch to Netflix URL failed entirely.", error: e.message };
+        }
 
       } else {
         // --- STANDARD OTP EXTRACTION LOGIC ---
@@ -218,8 +228,7 @@ async function processNetflix(url, isHousehold = false) {
         
         const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
         
-        // If it's a completely blank subject, heavily verify it has the Netflix sender string inside the body
-        if (subject === "" && !isFromNetflix) return { found: false };
+        if (subject === "" && !isFromNetflix) return { found: false, debug_reason: "Blank subject, not from Netflix." };
 
         const code = extractNetflixBody(rawBody);
 
@@ -232,7 +241,7 @@ async function processNetflix(url, isHousehold = false) {
             timestamp: msg.mail_timestamp
           };
         }
-        return { found: false };
+        return { found: false, debug_reason: "Standard OTP extraction failed." };
       }
     });
 
@@ -250,7 +259,12 @@ async function processNetflix(url, isHousehold = false) {
       });
     }
 
-    return jsonResponse({ status: "not_found", message: "Extraction failed." });
+    // IF WE GET HERE, IT MEANS ALL EXTRACTIONS FAILED. RETURN THE DEBUG LOG!
+    return jsonResponse({ 
+        status: "not_found", 
+        message: "Extraction failed.",
+        debug_details: results 
+    });
   };
 
   try {
@@ -259,7 +273,8 @@ async function processNetflix(url, isHousehold = false) {
   } catch (e) {
     return jsonResponse({ error: e.message }, 500);
   }
-    }
+}
+
     
 
 // --- PRIME VIDEO TOTP LOGIC (Waits for Fresh 30s) ---
