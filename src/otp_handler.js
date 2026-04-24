@@ -151,17 +151,15 @@ async function processNetflix(url, isHousehold = false) {
 
     if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
 
-    // Strict filtering based on the route mode (Now supports Fwd: prefixes)
+    // 1. BROAD CATCH: Use .includes() to bypass infinite "Fwd:" prefixes
     const candidates = msgList.filter(msg => {
-      const sub = (msg.mail_subject || "").trim();
+      const sub = (msg.mail_subject || "").toLowerCase();
       if (isHousehold) {
-        // (?:Fwd?:\s*)? optionally allows "Fwd: " or "FW: " at the start
-        return /^(?:Fwd?:\s*)?Your\s+Netflix\s+temporary\s+access\s+code$/i.test(sub);
+        return sub.includes("temporary access code");
       } else {
-        return /^(?:Fwd?:\s*)?Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
+        return sub.includes("sign-in code");
       }
     });
-
 
     if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No applicable Netflix emails found." });
 
@@ -170,12 +168,21 @@ async function processNetflix(url, isHousehold = false) {
       const subject = unescapeHtml(msg.mail_subject || "");
 
       if (isHousehold) {
-        // --- HOUSEHOLD EXTRACTION LOGIC ---
+        // --- HOUSEHOLD EXTRACTION LOGIC (Deep Source Verification) ---
         const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
         let rawBody = bodyData.mail_body || "";
         
-        // Clean quoted-printable artifacts to prevent broken URLs
+        // Clean quoted-printable artifacts to reveal the true text
         rawBody = rawBody.replace(/=\r?\n/g, '').replace(/=3D/g, '=').replace(/&amp;/g, '&');
+        
+        // 2. DEEP VERIFICATION: Confirm the original sender was Netflix inside the body
+        const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
+        const hasOriginalSubject = /Your\s+Netflix\s+temporary\s+access\s+code/i.test(rawBody);
+        
+        if (!isFromNetflix || !hasOriginalSubject) {
+          return { found: false }; // It was a fake or unrelated forward
+        }
+
         const linkMatch = rawBody.match(/https:\/\/www\.netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
 
         if (linkMatch) {
@@ -208,7 +215,12 @@ async function processNetflix(url, isHousehold = false) {
       } else {
         // --- STANDARD OTP EXTRACTION LOGIC ---
         const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
-        const rawBody = bodyData.mail_body || "";
+        let rawBody = bodyData.mail_body || "";
+        
+        // Deep Verification for Standard Sign-in Codes
+        const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
+        if (!isFromNetflix) return { found: false };
+
         const code = extractNetflixBody(rawBody);
 
         if (code) {
@@ -231,7 +243,7 @@ async function processNetflix(url, isHousehold = false) {
       const latest = validResults[0];
       return jsonResponse({
         status: "success",
-        platform: "netflix",
+        platform: isHousehold ? "netflix-household" : "netflix",
         email: mailParam,
         code: latest.code,
         date_time: latest.date_time
@@ -333,11 +345,9 @@ function unescapeHtml(str) {
 }
 
 function extractNetflixHouseholdCode(htmlContent) {
-  // 1. JSON Data Extraction (Highest Reliability)
   const jsonMatch = htmlContent.match(/"challengeOtp"\s*:\s*\{[^}]*"value"\s*:\s*"(\d{4,6})"/);
   if (jsonMatch) return jsonMatch[1];
 
-  // 2. Fallback HTML Element Extraction
   const divMatch = htmlContent.match(/data-uia="travel-verification-otp"[^>]*>\s*(\d{4,6})\s*</);
   if (divMatch) return divMatch[1];
 
