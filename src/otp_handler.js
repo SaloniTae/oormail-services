@@ -151,15 +151,17 @@ async function processNetflix(url, isHousehold = false) {
 
     if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
 
-    // Strict filtering based on the route mode
+    // Strict filtering based on the route mode (Now supports Fwd: prefixes)
     const candidates = msgList.filter(msg => {
       const sub = (msg.mail_subject || "").trim();
       if (isHousehold) {
-        return /^Your\s+Netflix\s+temporary\s+access\s+code$/i.test(sub);
+        // (?:Fwd?:\s*)? optionally allows "Fwd: " or "FW: " at the start
+        return /^(?:Fwd?:\s*)?Your\s+Netflix\s+temporary\s+access\s+code$/i.test(sub);
       } else {
-        return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
+        return /^(?:Fwd?:\s*)?Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
       }
     });
+
 
     if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No applicable Netflix emails found." });
 
