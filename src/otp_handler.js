@@ -110,7 +110,6 @@ export async function handleOtpRequest(request) {
     return jsonResponse({ error: "Unauthorized access." }, 401);
   }
 
-  // Handle standard OTP routes
   if (path.endsWith("/otp")) {
     if (platformParam === "netflix") return await processNetflix(url, false);
     if (platformParam === "primevideo") return await processPrimeTotp(request, url);
@@ -118,7 +117,6 @@ export async function handleOtpRequest(request) {
     return jsonResponse({ error: "Missing or unsupported platform parameter." }, 400);
   } 
   
-  // Handle explicit household route
   if (path.endsWith("/household")) {
     return await processNetflix(url, true);
   }
@@ -151,29 +149,19 @@ async function processNetflix(url, isHousehold = false) {
 
     if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
 
-    // 1. BROAD CATCH: Use .includes() to bypass infinite "Fwd:" prefixes
+    // 1. BROAD CATCH: Inspects subject OR excerpt, catching blank-subject anomalies from forwards.
     const candidates = msgList.filter(msg => {
       const sub = (msg.mail_subject || "").toLowerCase();
-      // Also unescape HTML just in case the subject got encoded
-      const cleanSub = unescapeHtml(sub); 
+      const excerpt = (msg.mail_excerpt || "").toLowerCase();
+
       if (isHousehold) {
-        return cleanSub.includes("temporary access code");
+        return sub.includes("temporary access") || excerpt.includes("temporary access") || excerpt.includes("netflix");
       } else {
-        return cleanSub.includes("sign-in code");
+        return sub.includes("sign-in code") || excerpt.includes("sign-in") || excerpt.includes("netflix");
       }
     });
 
-    if (candidates.length === 0) {
-      // DEBUG MODE: Return exactly what the server sees in the inbox
-      const foundSubjects = msgList.map(msg => msg.mail_subject);
-      return jsonResponse({ 
-        status: "not_found", 
-        message: "No applicable Netflix emails found.",
-        debug_inbox_count: msgList.length,
-        debug_subjects_found: foundSubjects
-      });
-    }
-
+    if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No applicable Netflix emails found." });
 
     const topCandidates = candidates.slice(0, 3);
     const promises = topCandidates.map(async (msg) => {
@@ -187,15 +175,8 @@ async function processNetflix(url, isHousehold = false) {
         // Clean quoted-printable artifacts to reveal the true text
         rawBody = rawBody.replace(/=\r?\n/g, '').replace(/=3D/g, '=').replace(/&amp;/g, '&');
         
-        // 2. DEEP VERIFICATION: Confirm the original sender was Netflix inside the body
-        const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
-        const hasOriginalSubject = /Your\s+Netflix\s+temporary\s+access\s+code/i.test(rawBody);
-        
-        if (!isFromNetflix || !hasOriginalSubject) {
-          return { found: false }; // It was a fake or unrelated forward
-        }
-
-        const linkMatch = rawBody.match(/https:\/\/www\.netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
+        // 2. DEEP VERIFICATION: Find the unique travel link directly, bypassing strict text sender checks
+        const linkMatch = rawBody.match(/https:\/\/(?:www\.)?netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
 
         if (linkMatch) {
           const travelUrl = linkMatch[0];
@@ -213,7 +194,7 @@ async function processNetflix(url, isHousehold = false) {
               return {
                 found: true,
                 code: code,
-                subject: subject,
+                subject: subject || "Netflix Household Code (Forwarded)", // Fallback if subject was stripped
                 date_time: convertToIST(msg.mail_timestamp),
                 timestamp: msg.mail_timestamp
               };
@@ -229,7 +210,6 @@ async function processNetflix(url, isHousehold = false) {
         const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
         let rawBody = bodyData.mail_body || "";
         
-        // Deep Verification for Standard Sign-in Codes
         const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
         if (!isFromNetflix) return { found: false };
 
@@ -239,7 +219,7 @@ async function processNetflix(url, isHousehold = false) {
           return {
             found: true,
             code: code,
-            subject: subject,
+            subject: subject || "Netflix Sign-In Code (Forwarded)",
             date_time: convertToIST(msg.mail_timestamp),
             timestamp: msg.mail_timestamp
           };
@@ -273,7 +253,7 @@ async function processNetflix(url, isHousehold = false) {
   }
 }
 
-// --- PRIME VIDEO TOTP LOGIC (Reverted: Waits for Fresh 30s) ---
+// --- PRIME VIDEO TOTP LOGIC (Waits for Fresh 30s) ---
 async function processPrimeTotp(request, url) {
   try {
     let secret = null;
@@ -287,19 +267,16 @@ async function processPrimeTotp(request, url) {
 
     if (!secret) return jsonResponse({ error: "Missing TOTP secret in request." }, 400);
 
-    // Clean the secret to prevent crypto engine crashes
     secret = String(secret).replace(/\s+/g, '').replace(/[^A-Z2-7]/gi, '');
 
     const msSinceEpoch = Date.now();
     const msIntoWindow = msSinceEpoch % 30000;
     const msRemaining = 30000 - msIntoWindow;
 
-    // Pause request if less than 28 seconds remain
     if (msRemaining < 28000) {
        await new Promise(resolve => setTimeout(resolve, msRemaining));
     }
 
-    // Creating the TOTP instance using the standard algorithm expected by Amazon
     const totp = new OTPAuth.TOTP({
       issuer: "your-app.com",
       algorithm: "SHA1", 
