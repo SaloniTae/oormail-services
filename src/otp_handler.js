@@ -151,13 +151,19 @@ async function processNetflix(url, isHousehold = false) {
 
     // 1. BROAD CATCH: Inspects subject OR excerpt, catching blank-subject anomalies from forwards.
     const candidates = msgList.filter(msg => {
-      const sub = (msg.mail_subject || "").toLowerCase();
-      const excerpt = (msg.mail_excerpt || "").toLowerCase();
+      const sub = (msg.mail_subject || "").toLowerCase().trim();
+      const excerpt = (msg.mail_excerpt || "").toLowerCase().trim();
 
       if (isHousehold) {
-        return sub.includes("temporary access") || excerpt.includes("temporary access") || excerpt.includes("netflix");
+        return sub.includes("temporary access") || 
+               excerpt.includes("temporary access") || 
+               excerpt.includes("netflix") ||
+               sub === ""; // Catches heavily forwarded emails
       } else {
-        return sub.includes("sign-in code") || excerpt.includes("sign-in") || excerpt.includes("netflix");
+        return sub.includes("sign-in code") || 
+               excerpt.includes("sign-in") || 
+               excerpt.includes("netflix") ||
+               sub === ""; // Catches heavily forwarded emails
       }
     });
 
@@ -194,7 +200,7 @@ async function processNetflix(url, isHousehold = false) {
               return {
                 found: true,
                 code: code,
-                subject: subject || "Netflix Household Code (Forwarded)", // Fallback if subject was stripped
+                subject: subject || "Netflix Household Code (Forwarded)", 
                 date_time: convertToIST(msg.mail_timestamp),
                 timestamp: msg.mail_timestamp
               };
@@ -211,7 +217,9 @@ async function processNetflix(url, isHousehold = false) {
         let rawBody = bodyData.mail_body || "";
         
         const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
-        if (!isFromNetflix) return { found: false };
+        
+        // If it's a completely blank subject, heavily verify it has the Netflix sender string inside the body
+        if (subject === "" && !isFromNetflix) return { found: false };
 
         const code = extractNetflixBody(rawBody);
 
@@ -251,7 +259,8 @@ async function processNetflix(url, isHousehold = false) {
   } catch (e) {
     return jsonResponse({ error: e.message }, 500);
   }
-}
+    }
+    
 
 // --- PRIME VIDEO TOTP LOGIC (Waits for Fresh 30s) ---
 async function processPrimeTotp(request, url) {
