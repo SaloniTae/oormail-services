@@ -178,8 +178,10 @@ async function processNetflix(url, isHousehold = false) {
         const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
         let rawBody = bodyData.mail_body || "";
         
+        // Clean quoted-printable artifacts to reveal the true text
         rawBody = rawBody.replace(/=\r?\n/g, '').replace(/=3D/g, '=').replace(/&amp;/g, '&');
         
+        // 2. DEEP VERIFICATION: Find the unique travel link directly
         const linkMatch = rawBody.match(/https:\/\/(?:www\.)?netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
 
         if (linkMatch) {
@@ -188,9 +190,7 @@ async function processNetflix(url, isHousehold = false) {
             const netflixRes = await fetch(travelUrl, {
               headers: { 
                 "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5", // Prevents Netflix from returning non-standard localized pages
-                "Upgrade-Insecure-Requests": "1"
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
               }
             });
             const netflixHtml = await netflixRes.text();
@@ -204,14 +204,12 @@ async function processNetflix(url, isHousehold = false) {
                 date_time: convertToIST(msg.mail_timestamp),
                 timestamp: msg.mail_timestamp
               };
-            } else {
-              return { found: false, debug_reason: "Code extraction failed after fetching URL", url_fetched: travelUrl, html_snippet: netflixHtml.substring(0, 350) };
             }
           } catch (e) {
-            return { found: false, debug_reason: "Fetch failed", error: e.message };
+            // Silently fail to let the next candidate attempt extraction
           }
         }
-        return { found: false, debug_reason: "No travel URL found in email body." };
+        return { found: false };
 
       } else {
         // --- STANDARD OTP EXTRACTION LOGIC ---
@@ -219,8 +217,7 @@ async function processNetflix(url, isHousehold = false) {
         let rawBody = bodyData.mail_body || "";
         
         const isFromNetflix = /info@account\.netflix\.com/i.test(rawBody);
-        
-        if (subject === "" && !isFromNetflix) return { found: false, debug_reason: "Blank subject, not from Netflix." };
+        if (subject === "" && !isFromNetflix) return { found: false };
 
         const code = extractNetflixBody(rawBody);
 
@@ -233,7 +230,7 @@ async function processNetflix(url, isHousehold = false) {
             timestamp: msg.mail_timestamp
           };
         }
-        return { found: false, debug_reason: "Standard OTP extraction failed." };
+        return { found: false };
       }
     });
 
@@ -251,11 +248,7 @@ async function processNetflix(url, isHousehold = false) {
       });
     }
 
-    return jsonResponse({ 
-        status: "not_found", 
-        message: "Extraction failed.",
-        debug_details: results 
-    });
+    return jsonResponse({ status: "not_found", message: "Extraction failed. The Netflix link may have expired." });
   };
 
   try {
@@ -347,21 +340,17 @@ function unescapeHtml(str) {
 }
 
 function extractNetflixHouseholdCode(htmlContent) {
-  // 1. Aggressively clean the HTML of all escaping (removes backslashes and decodes quotes)
-  let clean = htmlContent.replace(/\\/g, '');
-  clean = clean.replace(/&quot;/g, '"');
-
-  // 2. High-Precision JSON Match
-  const jsonMatch = clean.match(/"challengeOtp"[^}]*?"value"\s*:\s*"(\d{4,6})"/i);
+  // 1. JSON Data Extraction (Perfectly matches your www_netflix_com_source.html)
+  const jsonMatch = htmlContent.match(/"challengeOtp"\s*:\s*\{[^}]*"value"\s*:\s*"(\d{4,6})"/);
   if (jsonMatch) return jsonMatch[1];
 
-  // 3. HTML Element Match
-  const divMatch = clean.match(/data-uia=["']travel-verification-otp["'][^>]*>\s*(\d{4,6})\s*</i);
+  // 2. Fallback HTML Element Extraction
+  const divMatch = htmlContent.match(/data-uia="travel-verification-otp"[^>]*>\s*(\d{4,6})\s*</);
   if (divMatch) return divMatch[1];
-
-  // 4. Nuclear Option: Find the word challengeOtp and grab the very next 4 digits
-  const broadMatch = clean.match(/challengeOtp.*?(\d{4})/i);
-  if (broadMatch) return broadMatch[1];
+  
+  // 3. Ultra-Fallback Class Extraction
+  const classMatch = htmlContent.match(/class="[^"]*challenge-code[^"]*"[^>]*>\s*(\d{4,6})\s*</);
+  if (classMatch) return classMatch[1];
 
   return null;
 }
