@@ -37,7 +37,6 @@ async function runQueuedTask(email, taskPromiseFn) {
 const OTPAuth = {
   TOTP: class {
     constructor({ issuer = "", algorithm = "SHA1", digits = 6, period = 30, secret }) {
-      // Map standard OTPAuth algorithms to Web Crypto API formats
       this.algorithm = algorithm === 'SHA256' ? 'SHA-256' : algorithm === 'SHA512' ? 'SHA-512' : 'SHA-1';
       this.digits = digits;
       this.period = period;
@@ -111,12 +110,19 @@ export async function handleOtpRequest(request) {
     return jsonResponse({ error: "Unauthorized access." }, 401);
   }
 
+  // Handle standard OTP routes
   if (path.endsWith("/otp")) {
-    if (platformParam === "netflix") return await processNetflix(url);
+    if (platformParam === "netflix") return await processNetflix(url, false);
     if (platformParam === "primevideo") return await processPrimeTotp(request, url);
+    if (platformParam === "netflix-household") return await processNetflix(url, true);
     return jsonResponse({ error: "Missing or unsupported platform parameter." }, 400);
   } 
   
+  // Handle explicit household route
+  if (path.endsWith("/household")) {
+    return await processNetflix(url, true);
+  }
+
   if (path.endsWith("/prime-totp")) {
     return await processPrimeTotp(request, url);
   }
@@ -124,8 +130,8 @@ export async function handleOtpRequest(request) {
   return jsonResponse({ error: "Endpoint not found." }, 404);
 }
 
-// --- NETFLIX LOGIC ---
-async function processNetflix(url) {
+// --- NETFLIX LOGIC (Unified Standard & Household) ---
+async function processNetflix(url, isHousehold = false) {
   const mailParam = url.searchParams.get("mail");
   const useQueue = url.searchParams.get("queue") === "true"; 
 
@@ -145,29 +151,75 @@ async function processNetflix(url) {
 
     if (msgList.length === 0) return jsonResponse({ status: "empty", message: "Inbox empty" });
 
+    // Strict filtering based on the route mode
     const candidates = msgList.filter(msg => {
       const sub = (msg.mail_subject || "").trim();
-      return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
+      if (isHousehold) {
+        return /^Your\s+Netflix\s+temporary\s+access\s+code$/i.test(sub);
+      } else {
+        return /^Netflix:\s+your\s+sign-in\s+code$/i.test(sub);
+      }
     });
 
-    if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No Netflix OTP emails found." });
+    if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No applicable Netflix emails found." });
 
     const topCandidates = candidates.slice(0, 3);
     const promises = topCandidates.map(async (msg) => {
-      const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
-      const rawBody = bodyData.mail_body || "";
-      const code = extractNetflixBody(rawBody);
+      const subject = unescapeHtml(msg.mail_subject || "");
 
-      if (code) {
-        return {
-          found: true,
-          code: code,
-          subject: unescapeHtml(msg.mail_subject || ""),
-          date_time: convertToIST(msg.mail_timestamp),
-          timestamp: msg.mail_timestamp
-        };
+      if (isHousehold) {
+        // --- HOUSEHOLD EXTRACTION LOGIC ---
+        const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
+        let rawBody = bodyData.mail_body || "";
+        
+        // Clean quoted-printable artifacts to prevent broken URLs
+        rawBody = rawBody.replace(/=\r?\n/g, '').replace(/=3D/g, '=').replace(/&amp;/g, '&');
+        const linkMatch = rawBody.match(/https:\/\/www\.netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
+
+        if (linkMatch) {
+          const travelUrl = linkMatch[0];
+          try {
+            const netflixRes = await fetch(travelUrl, {
+              headers: { 
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+              }
+            });
+            const netflixHtml = await netflixRes.text();
+            const code = extractNetflixHouseholdCode(netflixHtml);
+
+            if (code) {
+              return {
+                found: true,
+                code: code,
+                subject: subject,
+                date_time: convertToIST(msg.mail_timestamp),
+                timestamp: msg.mail_timestamp
+              };
+            }
+          } catch (e) {
+            // Silently fail to let the next candidate attempt extraction
+          }
+        }
+        return { found: false };
+
+      } else {
+        // --- STANDARD OTP EXTRACTION LOGIC ---
+        const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
+        const rawBody = bodyData.mail_body || "";
+        const code = extractNetflixBody(rawBody);
+
+        if (code) {
+          return {
+            found: true,
+            code: code,
+            subject: subject,
+            date_time: convertToIST(msg.mail_timestamp),
+            timestamp: msg.mail_timestamp
+          };
+        }
+        return { found: false };
       }
-      return { found: false };
     });
 
     const results = await Promise.all(promises);
@@ -194,7 +246,6 @@ async function processNetflix(url) {
     return jsonResponse({ error: e.message }, 500);
   }
 }
-
 
 // --- PRIME VIDEO TOTP LOGIC (Reverted: Waits for Fresh 30s) ---
 async function processPrimeTotp(request, url) {
@@ -248,9 +299,6 @@ async function processPrimeTotp(request, url) {
   }
 }
 
-
-
-
 // --- HELPERS & EXTRACTION ---
 async function callOorApi(params) {
   const url = new URL(BASE_URL);
@@ -280,6 +328,18 @@ function convertToIST(unixTimestamp) {
 function unescapeHtml(str) {
   if (!str) return "";
   return str.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+function extractNetflixHouseholdCode(htmlContent) {
+  // 1. JSON Data Extraction (Highest Reliability)
+  const jsonMatch = htmlContent.match(/"challengeOtp"\s*:\s*\{[^}]*"value"\s*:\s*"(\d{4,6})"/);
+  if (jsonMatch) return jsonMatch[1];
+
+  // 2. Fallback HTML Element Extraction
+  const divMatch = htmlContent.match(/data-uia="travel-verification-otp"[^>]*>\s*(\d{4,6})\s*</);
+  if (divMatch) return divMatch[1];
+
+  return null;
 }
 
 function extractNetflixBody(htmlContent) {
