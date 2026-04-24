@@ -480,8 +480,8 @@ export default {
     const url = new URL(request.url);
     const f = url.searchParams.get("f");
 
-    // 1. Check for the OTP and TOTP Routes specifically
-    if (url.pathname === "/otp" || url.pathname === "/prime-totp") {
+    // 1. Check for the OTP, TOTP, and Household Routes specifically
+    if (url.pathname === "/otp" || url.pathname === "/prime-totp" || url.pathname === "/household") {
       return await handleOtpRequest(request);
     }
 
