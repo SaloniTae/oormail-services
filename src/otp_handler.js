@@ -33,7 +33,7 @@ async function runQueuedTask(email, taskPromiseFn) {
   return result;
 }
 
-// --- OTPAUTH POLYFILL (No npm install required) ---
+// --- OTPAUTH POLYFILL ---
 const OTPAuth = {
   TOTP: class {
     constructor({ issuer = "", algorithm = "SHA1", digits = 6, period = 30, secret }) {
@@ -128,8 +128,6 @@ export async function handleOtpRequest(request) {
   return jsonResponse({ error: "Endpoint not found." }, 404);
 }
 
-
-
 // --- NETFLIX LOGIC (Unified Standard & Household) ---
 async function processNetflix(url, isHousehold = false) {
   const mailParam = url.searchParams.get("mail");
@@ -180,46 +178,40 @@ async function processNetflix(url, isHousehold = false) {
         const bodyData = await callOorApi({ f: "fetch_email", sid_token: sidToken, email_id: msg.mail_id });
         let rawBody = bodyData.mail_body || "";
         
-        // Clean quoted-printable artifacts to reveal the true text
         rawBody = rawBody.replace(/=\r?\n/g, '').replace(/=3D/g, '=').replace(/&amp;/g, '&');
         
-        // 2. DEEP VERIFICATION: Find the unique travel link
         const linkMatch = rawBody.match(/https:\/\/(?:www\.)?netflix\.com\/account\/travel\/verify[^\s"'><]+/i);
 
-        if (!linkMatch) {
-            return { found: false, debug_reason: "Travel URL not found in email body.", body_snippet: rawBody.substring(0, 250) };
-        }
+        if (linkMatch) {
+          const travelUrl = linkMatch[0];
+          try {
+            const netflixRes = await fetch(travelUrl, {
+              headers: { 
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5", // Prevents Netflix from returning non-standard localized pages
+                "Upgrade-Insecure-Requests": "1"
+              }
+            });
+            const netflixHtml = await netflixRes.text();
+            const code = extractNetflixHouseholdCode(netflixHtml);
 
-        const travelUrl = linkMatch[0];
-        try {
-          const netflixRes = await fetch(travelUrl, {
-            headers: { 
-              "User-Agent": USER_AGENT,
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            if (code) {
+              return {
+                found: true,
+                code: code,
+                subject: subject || "Netflix Household Code (Forwarded)", 
+                date_time: convertToIST(msg.mail_timestamp),
+                timestamp: msg.mail_timestamp
+              };
+            } else {
+              return { found: false, debug_reason: "Code extraction failed after fetching URL", url_fetched: travelUrl, html_snippet: netflixHtml.substring(0, 350) };
             }
-          });
-          const netflixHtml = await netflixRes.text();
-          const code = extractNetflixHouseholdCode(netflixHtml);
-
-          if (code) {
-            return {
-              found: true,
-              code: code,
-              subject: subject || "Netflix Household Code (Forwarded)", 
-              date_time: convertToIST(msg.mail_timestamp),
-              timestamp: msg.mail_timestamp
-            };
-          } else {
-            return { 
-                found: false, 
-                debug_reason: "URL fetched, but code extraction failed. Netflix might be blocking the Worker.", 
-                url_fetched: travelUrl,
-                html_snippet: netflixHtml.substring(0, 350) 
-            };
+          } catch (e) {
+            return { found: false, debug_reason: "Fetch failed", error: e.message };
           }
-        } catch (e) {
-          return { found: false, debug_reason: "Fetch to Netflix URL failed entirely.", error: e.message };
         }
+        return { found: false, debug_reason: "No travel URL found in email body." };
 
       } else {
         // --- STANDARD OTP EXTRACTION LOGIC ---
@@ -259,7 +251,6 @@ async function processNetflix(url, isHousehold = false) {
       });
     }
 
-    // IF WE GET HERE, IT MEANS ALL EXTRACTIONS FAILED. RETURN THE DEBUG LOG!
     return jsonResponse({ 
         status: "not_found", 
         message: "Extraction failed.",
@@ -274,8 +265,6 @@ async function processNetflix(url, isHousehold = false) {
     return jsonResponse({ error: e.message }, 500);
   }
 }
-
-    
 
 // --- PRIME VIDEO TOTP LOGIC (Waits for Fresh 30s) ---
 async function processPrimeTotp(request, url) {
@@ -358,11 +347,21 @@ function unescapeHtml(str) {
 }
 
 function extractNetflixHouseholdCode(htmlContent) {
-  const jsonMatch = htmlContent.match(/"challengeOtp"\s*:\s*\{[^}]*"value"\s*:\s*"(\d{4,6})"/);
+  // 1. Aggressively clean the HTML of all escaping (removes backslashes and decodes quotes)
+  let clean = htmlContent.replace(/\\/g, '');
+  clean = clean.replace(/&quot;/g, '"');
+
+  // 2. High-Precision JSON Match
+  const jsonMatch = clean.match(/"challengeOtp"[^}]*?"value"\s*:\s*"(\d{4,6})"/i);
   if (jsonMatch) return jsonMatch[1];
 
-  const divMatch = htmlContent.match(/data-uia="travel-verification-otp"[^>]*>\s*(\d{4,6})\s*</);
+  // 3. HTML Element Match
+  const divMatch = clean.match(/data-uia=["']travel-verification-otp["'][^>]*>\s*(\d{4,6})\s*</i);
   if (divMatch) return divMatch[1];
+
+  // 4. Nuclear Option: Find the word challengeOtp and grab the very next 4 digits
+  const broadMatch = clean.match(/challengeOtp.*?(\d{4})/i);
+  if (broadMatch) return broadMatch[1];
 
   return null;
 }
