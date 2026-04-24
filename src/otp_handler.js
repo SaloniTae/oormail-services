@@ -154,14 +154,26 @@ async function processNetflix(url, isHousehold = false) {
     // 1. BROAD CATCH: Use .includes() to bypass infinite "Fwd:" prefixes
     const candidates = msgList.filter(msg => {
       const sub = (msg.mail_subject || "").toLowerCase();
+      // Also unescape HTML just in case the subject got encoded
+      const cleanSub = unescapeHtml(sub); 
       if (isHousehold) {
-        return sub.includes("temporary access code");
+        return cleanSub.includes("temporary access code");
       } else {
-        return sub.includes("sign-in code");
+        return cleanSub.includes("sign-in code");
       }
     });
 
-    if (candidates.length === 0) return jsonResponse({ status: "not_found", message: "No applicable Netflix emails found." });
+    if (candidates.length === 0) {
+      // DEBUG MODE: Return exactly what the server sees in the inbox
+      const foundSubjects = msgList.map(msg => msg.mail_subject);
+      return jsonResponse({ 
+        status: "not_found", 
+        message: "No applicable Netflix emails found.",
+        debug_inbox_count: msgList.length,
+        debug_subjects_found: foundSubjects
+      });
+    }
+
 
     const topCandidates = candidates.slice(0, 3);
     const promises = topCandidates.map(async (msg) => {
